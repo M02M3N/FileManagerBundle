@@ -26,7 +26,7 @@ use Symfony\Component\HttpFoundation\JsonResponse;
 use Symfony\Component\HttpFoundation\Request;
 use Symfony\Component\HttpFoundation\Response;
 use Symfony\Component\Validator\Constraints\NotBlank;
-
+use Twistor\FlysystemStreamWrapper;
 /**
  * @author Arthur Gribet <a.gribet@gmail.com>
  */
@@ -56,12 +56,16 @@ class ManagerController extends Controller
         }
         $fileManager = $this->newFileManager($queryParameters);
 
+        $filesystem = $this->container->get('awss3v2_filesystem');
+
+        FlysystemStreamWrapper::register('s3', $filesystem);
+
         // Folder search
-        $directoriesArbo = $this->retrieveSubDirectories($fileManager, $fileManager->getDirName(), DIRECTORY_SEPARATOR, $fileManager->getBaseName());
+        $directoriesArbo = $this->retrieveSubDirectories($fileManager, 's3://', DIRECTORY_SEPARATOR, 's3://');
 
         // File search
         $finderFiles = new Finder();
-        $finderFiles->in($fileManager->getCurrentPath())->depth(0);
+        $finderFiles->in('s3://')->depth(0);
         $regex = $fileManager->getRegex();
 
         $orderBy = $fileManager->getQueryParameter('orderby');
@@ -164,7 +168,7 @@ class ManagerController extends Controller
             ->getForm();
 
         /* @var Form $form */
-        $form->handleRequest($request);
+//        $form->handleRequest($request);
         /** @var Form $formRename */
         $formRename = $this->createRenameForm();
 
