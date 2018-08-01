@@ -126,23 +126,12 @@ class FileManager
 
     private function checkSecurity()
     {
+        //TODO change security
+
         if (!isset($this->configuration['dir'])) {
             throw new HttpException(Response::HTTP_INTERNAL_SERVER_ERROR, 'Please define a "dir" parameter in your config.yml');
         }
-        $dir = $this->configuration['dir'];
 
-        $fileSystem = new Filesystem();
-        $exist = $fileSystem->exists($dir);
-        if (false === $exist) {
-            throw new HttpException(Response::HTTP_INTERNAL_SERVER_ERROR, 'Directory does not exist.');
-        }
-
-        $currentPath = $this->getCurrentPath();
-
-        // check Path security
-        if (false === $currentPath || 0 !== mb_strpos($currentPath, $this->getBasePath())) {
-            throw new HttpException(Response::HTTP_UNAUTHORIZED, 'You are not allowed to access this folder.');
-        }
     }
 
     public function getModule()

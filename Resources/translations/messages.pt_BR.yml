@@ -1,6 +1,7 @@
 file:
   add:
     success: enviado com sucesso
+    danger: o tipo de arquivo não é permitido
   renamed:
     success: O arquivo foi renomeado com sucesso
     danger: Arquivo já existe ou você não está autorizado a renomear este arquivo

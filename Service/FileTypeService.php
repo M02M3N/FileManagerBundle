@@ -9,11 +9,6 @@ use Symfony\Component\Asset\Packages;
 
 class FileTypeService
 {
-    const IMAGE_SIZE = [
-        FileManager::VIEW_LIST => '22',
-        FileManager::VIEW_THUMBNAIL => '100',
-    ];
-
     /**
      * @var Router
      */
@@ -32,19 +27,24 @@ class FileTypeService
 
     public function preview(FileManager $fileManager, SplFileInfo $file)
     {
+        $image_size = [
+            FileManager::VIEW_LIST => '22',
+            FileManager::VIEW_THUMBNAIL => '100',
+        ];
+
         if ($fileManager->getImagePath()) {
             $filePath = htmlentities($fileManager->getImagePath().rawurlencode($file->getFilename()));
         } else {
             $filePath = $this->router->generate('file_manager_file', array_merge($fileManager->getQueryParameters(), ['fileName' => rawurlencode($file->getFilename())]));
         }
+
         $extension = $file->getExtension();
-        $type = $file->getType();
-        if ('file' === $type) {
-            $size = $this::IMAGE_SIZE[$fileManager->getView()];
+        if ($file->isFile()) {
+            $size = $image_size[$fileManager->getView()];
 
             return $this->fileIcon($filePath, $extension, $size);
         }
-        if ('dir' === $type) {
+        if (!$file->isFile()) {
             $href = $this->router->generate('file_manager', array_merge($fileManager->getQueryParameters(), ['route' => $fileManager->getRoute().DIRECTORY_SEPARATOR.rawurlencode($file->getFilename())]));
 
             return [

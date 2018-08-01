@@ -25,6 +25,7 @@ class File
      */
     private $fileManager;
     private $preview;
+    public $fileLink;
 
     /**
      * File constructor.
@@ -61,7 +62,7 @@ class File
 
     public function getHTMLSize()
     {
-        if ('file' === $this->getFile()->getType()) {
+        if ($this->getFile()->isFile()) {
             $size = $this->file->getSize() / 1000;
             $kb = $this->translator->trans('size.kb');
             $mb = $this->translator->trans('size.mb');
@@ -81,7 +82,7 @@ class File
                 $attr .= "data-width=\"{$width}\" data-height=\"{$height}\" ";
             }
 
-            if ('file' === $this->file->getType()) {
+            if ($this->getFile()->isFile()) {
                 $attr .= "data-path=\"{$this->getPreview()['path']}\"";
                 $attr .= ' class="select"';
             }
@@ -120,5 +121,21 @@ class File
     public function setPreview($preview)
     {
         $this->preview = $preview;
+    }
+
+    /**
+     * @return string
+     */
+    public function getFileLink()
+    {
+        return $this->preview;
+    }
+
+    /**
+     * @param string $fileLink
+     */
+    public function setFileLink($fileLink)
+    {
+        $this->fileLink = $fileLink;
     }
 }

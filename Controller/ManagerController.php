@@ -13,7 +13,6 @@ use Symfony\Bundle\FrameworkBundle\Controller\Controller;
 use Symfony\Component\EventDispatcher\GenericEvent;
 use Symfony\Component\Filesystem\Exception\IOException;
 use Symfony\Component\Filesystem\Exception\IOExceptionInterface;
-use Symfony\Component\Filesystem\Filesystem;
 use Symfony\Component\Finder\Finder;
 use Symfony\Component\Finder\SplFileInfo;
 use Symfony\Component\Form\Extension\Core\Type\FormType;
@@ -27,23 +26,30 @@ use Symfony\Component\HttpFoundation\Request;
 use Symfony\Component\HttpFoundation\Response;
 use Symfony\Component\Validator\Constraints\NotBlank;
 use Twistor\FlysystemStreamWrapper;
+use League\Flysystem\Filesystem as Flysystem;
+use League\Flysystem\AwsS3v2\AwsS3Adapter;
 /**
  * @author Arthur Gribet <a.gribet@gmail.com>
+ * @author Moumen ALSHAAR <moumen.ashaar@gmail.com>
  */
 class ManagerController extends Controller
 {
+    const PROTOCOL = 's3';
+    const FileManager_folder_name = 'file-manager';
     /**
      * @var FileManager
      */
     protected $fileManager;
 
     /**
+     * @var Flysystem
+     */
+    protected $filesystem;
+
+    /**
      * @Route("/", name="file_manager")
-     *
      * @param Request $request
-     *
      * @return Response
-     *
      * @throws \Exception
      */
     public function indexAction(Request $request)
@@ -54,24 +60,33 @@ class ManagerController extends Controller
         if ($isJson) {
             unset($queryParameters['json']);
         }
+        $session = $this->container->get('session');
+
         $fileManager = $this->newFileManager($queryParameters);
 
-        $filesystem = $this->container->get('awss3v2_filesystem');
+        $finderFiles = new Finder();
 
-        FlysystemStreamWrapper::register('s3', $filesystem);
+        // Folder search //
+        $directoriesArbo = $this->retrieveSubDirectories($fileManager, DIRECTORY_SEPARATOR, DIRECTORY_SEPARATOR);
 
-        // Folder search
-        $directoriesArbo = $this->retrieveSubDirectories($fileManager, 's3://', DIRECTORY_SEPARATOR, 's3://');
+        $filesystem = $this->getFileSystem($queryParameters);
+
+        FlysystemStreamWrapper::register(self::PROTOCOL, $filesystem);// start stream from the adapter folder
+
+        $streamDir = self::PROTOCOL . PATH_SEPARATOR . DIRECTORY_SEPARATOR . DIRECTORY_SEPARATOR;
 
         // File search
-        $finderFiles = new Finder();
-        $finderFiles->in('s3://')->depth(0);
+        $finderFiles->in($streamDir);
+
         $regex = $fileManager->getRegex();
 
+        //////sort the files/////////////
         $orderBy = $fileManager->getQueryParameter('orderby');
         $orderDESC = OrderExtension::DESC === $fileManager->getQueryParameter('order');
         if (!$orderBy) {
-            $finderFiles->sortByType();
+            $finderFiles->sort(function (\SplFileInfo $a, \SplFileInfo $b) {
+                return trim($b->getExtension()) == false;
+            });
         }
 
         switch ($orderBy) {
@@ -80,14 +95,14 @@ class ManagerController extends Controller
                     return strcmp(strtolower($b->getFilename()), strtolower($a->getFilename()));
                 });
                 break;
-            case 'date':
-                $finderFiles->sortByModifiedTime();
-                break;
-            case 'size':
-                $finderFiles->sort(function (\SplFileInfo $a, \SplFileInfo $b) {
-                    return $a->getSize() - $b->getSize();
-                });
-                break;
+//            case 'date':
+//                $finderFiles->sortByModifiedTime();//TODO .... FIX SORT FOR FOLDERS
+//                break;
+//            case 'size':
+//                $finderFiles->sort(function (\SplFileInfo $a, \SplFileInfo $b) {
+//                    return $a->getSize() - $b->getSize();//TODO .... FIX SORT FOR FOLDERS
+//                });
+//                break;
         }
 
         if ($fileManager->getTree()) {
@@ -96,7 +111,7 @@ class ManagerController extends Controller
             });
         } else {
             $finderFiles->filter(function (SplFileInfo $file) use ($regex) {
-                if ('file' === $file->getType()) {
+                if ($file->isFile()) {
                     if (preg_match($regex, $file->getFilename())) {
                         return $file->isReadable();
                     }
@@ -104,14 +119,18 @@ class ManagerController extends Controller
                     return false;
                 }
 
-                return $file->isReadable();
+                return true;
             });
         }
 
         $formDelete = $this->createDeleteForm()->createView();
         $fileArray = [];
-        foreach ($finderFiles as $file) {
-            $fileArray[] = new File($file, $this->get('translator'), $this->get('file_type_service'), $fileManager);
+        foreach ($finderFiles->files() as $file) {
+            $filePath = $this->getFileLink($fileManager->getCurrentRoute(), $file->getfileName());
+            $newFile = new File($file, $this->get('translator'), $this->get('file_type_service'), $fileManager);
+            $newFile->setFileLink($filePath);
+
+            $fileArray[] = $newFile;
         }
 
         if ('dimension' === $orderBy) {
@@ -151,7 +170,7 @@ class ManagerController extends Controller
         }
         $parameters['treeData'] = json_encode($directoriesArbo);
 
-        $form = $this->get('form.factory')->createNamedBuilder('rename', new FormType)
+        $form = $this->container->get('form.factory')->createNamedBuilder('rename')
             ->add('name', new TextType, [
                 'constraints' => [
                     new NotBlank(),
@@ -168,30 +187,27 @@ class ManagerController extends Controller
             ->getForm();
 
         /* @var Form $form */
-//        $form->handleRequest($request);
+        $form->handleRequest($request);
         /** @var Form $formRename */
         $formRename = $this->createRenameForm();
 
         if ($form->isSubmitted() && $form->isValid()) {
             $data = $form->getData();
-            $fs = new Filesystem();
-            $directory = $directorytmp = $fileManager->getCurrentPath().DIRECTORY_SEPARATOR.$data['name'];
-            $i = 1;
 
-            while ($fs->exists($directorytmp)) {
-                $directorytmp = "{$directory} ({$i})";
-                ++$i;
-            }
-            $directory = $directorytmp;
+            $directory = $data['name'];
+
+            $fileInfo = $this->findFile($filesystem, $directory);
 
             try {
-                $fs->mkdir($directory);
-                $this->addFlash('success', $translator->trans('folder.add.success'));
+                if (!$fileInfo['exist']) {
+                    $filesystem->createDir($directory);
+                }
+                $session->getFlashBag()->add('success', $translator->trans('folder.add.success'));
             } catch (IOExceptionInterface $e) {
-                $this->addFlash('danger', $translator->trans('folder.add.danger', ['%message%' => $data['name']]));
+                $session->getFlashBag()->add('danger', $translator->trans('folder.add.danger', ['%message%' => $data['name']]));
             }
 
-            return $this->redirectToRoute('file_manager', $fileManager->getQueryParameters());
+            $this->redirect($this->generateUrl('file_manager', $fileManager->getQueryParameters()));
         }
         $parameters['form'] = $form->createView();
         $parameters['formRename'] = $formRename->createView();
@@ -201,12 +217,9 @@ class ManagerController extends Controller
 
     /**
      * @Route("/rename/{fileName}", name="file_manager_rename")
-     *
      * @param Request $request
      * @param $fileName
-     *
      * @return \Symfony\Component\HttpFoundation\RedirectResponse
-     *
      * @throws \Exception
      */
     public function renameFileAction(Request $request, $fileName)
@@ -214,6 +227,9 @@ class ManagerController extends Controller
         $translator = $this->get('translator');
         $queryParameters = $request->query->all();
         $formRename = $this->createRenameForm();
+        $session = $this->container->get('session');
+        $filesystem = $this->getFileSystem($queryParameters);
+
         /* @var Form $formRename */
         $formRename->handleRequest($request);
         if ($formRename->isSubmitted() && $formRename->isValid()) {
@@ -222,63 +238,69 @@ class ManagerController extends Controller
             $newfileName = $data['name'].$extension;
             if ($newfileName !== $fileName && isset($data['name'])) {
                 $fileManager = $this->newFileManager($queryParameters);
-                $NewfilePath = $fileManager->getCurrentPath().DIRECTORY_SEPARATOR.$newfileName;
-                $OldfilePath = realpath($fileManager->getCurrentPath().DIRECTORY_SEPARATOR.$fileName);
-                if (0 !== strpos($NewfilePath, $fileManager->getCurrentPath())) {
-                    $this->addFlash('danger', $translator->trans('file.renamed.unauthorized'));
-                } else {
-                    $fs = new Filesystem();
+
+                if (!$filesystem->has($fileName)) {
+                    $session->getFlashBag()->add('danger', $translator->trans('file.renamed.unauthorized'));
+                }
+                else {
                     try {
-                        $fs->rename($OldfilePath, $NewfilePath);
-                        $this->addFlash('success', $translator->trans('file.renamed.success'));
-                        //File has been renamed successfully
+                        $filesystem->rename($fileName, $newfileName);
+
+                        $session->getFlashBag()->add('success', $translator->trans('file.renamed.success'));
+
                     } catch (IOException $exception) {
-                        $this->addFlash('danger', $translator->trans('file.renamed.danger'));
+                        $session->getFlashBag()->add('danger', $translator->trans('file.renamed.danger'));
                     }
                 }
             } else {
-                $this->addFlash('warning', $translator->trans('file.renamed.nochanged'));
+                $session->getFlashBag()->add('warning', $translator->trans('file.renamed.nochanged'));
             }
         }
 
-        return $this->redirectToRoute('file_manager', $queryParameters);
+        return $this->redirect($this->generateUrl('file_manager', $queryParameters));
     }
 
     /**
      * @Route("/upload/", name="file_manager_upload")
-     *
      * @param Request $request
-     *
      * @return Response
-     *
      * @throws \Exception
      */
     public function uploadFileAction(Request $request)
     {
-        $fileManager = $this->newFileManager($request->query->all());
+        $queryParameters = $request->query->all();
+        $fileManager = $this->newFileManager($queryParameters);
+        $filesystem = $this->getFileSystem($queryParameters);
+        $session = $this->container->get('session');
 
-        $options = [
-            'upload_dir' => $fileManager->getCurrentPath().DIRECTORY_SEPARATOR,
-            'upload_url' => $fileManager->getImagePath(),
-            'accept_file_types' => $fileManager->getRegex(),
-            'print_response' => false,
+        $this->dispatch(FileManagerEvents::PRE_UPDATE);
+
+        $response = [
+            'files' => []
         ];
-        if (isset($fileManager->getConfiguration()['upload'])) {
-            $options += $fileManager->getConfiguration()['upload'];
-        }
+        if (count($request->files->all())) {
 
-        $this->dispatch(FileManagerEvents::PRE_UPDATE, ['options' => &$options]);
+            foreach ($request->files->all() as $fileArray) {
 
-        $uploadHandler = new UploadHandler($options);
-        $response = $uploadHandler->response;
+                foreach ($fileArray as $file) {
+                    $result = $exist = false;
 
-        foreach ($response['files'] as $file) {
-            if (isset($file->error)) {
-                $file->error = $this->get('translator')->trans($file->error);
-            }
+                    if (in_array($mimeType = $file->getClientMimeType(), ['image/png', 'image/gif', 'image/jpeg', 'text/css', 'application/javascript'])) {
 
-            if (!$fileManager->getImagePath()) {
-                $file->url = $this->generateUrl('file_manager_file', array_merge($fileManager->getQueryParameters(), ['fileName' => $file->url]));
+                        $exist = $filesystem->has($file->getClientOriginalName());
+
+                        $result = $filesystem->put($file->getClientOriginalName(), file_get_contents($file->getPathname()));
+
+                        $response['files'] = [$this->getResponse($filesystem , $file->getClientOriginalName())];
+
+                    } else {
+                        $session->getFlashBag()->add('danger', 'file.add.danger');
+                    }
+
+                    if($exist && $result) {
+                        $this->createInvalidation($fileManager->getCurrentRoute(), $file->getClientOriginalName());
+                    }
+                }
             }
         }
 
@@ -289,29 +311,24 @@ class ManagerController extends Controller
 
     /**
      * @Route("/file/{fileName}", name="file_manager_file")
-     *
      * @param Request $request
      * @param $fileName
-     *
      * @return BinaryFileResponse
-     *
      * @throws \Exception
      */
     public function binaryFileResponseAction(Request $request, $fileName)
     {
+        //TODO .... REMOVE IT
         $fileManager = $this->newFileManager($request->query->all());
 
-        return new BinaryFileResponse($fileManager->getCurrentPath().DIRECTORY_SEPARATOR.urldecode($fileName));
+        return $fileName;
     }
 
     /**
      * @Route("/delete/", name="file_manager_delete")
-     *
      * @param Request $request
      * @Method("DELETE")
-     *
      * @return \Symfony\Component\HttpFoundation\RedirectResponse
-     *
      * @throws \Exception
      */
     public function deleteAction(Request $request)
@@ -319,51 +336,40 @@ class ManagerController extends Controller
         $form = $this->createDeleteForm();
         $form->handleRequest($request);
         $queryParameters = $request->query->all();
+        $session = $this->container->get('session');
         if ($form->isSubmitted() && $form->isValid()) {
             // remove file
             $fileManager = $this->newFileManager($queryParameters);
-            $fs = new Filesystem();
+            $filesystem = $this->getFileSystem($queryParameters);
+
             if (isset($queryParameters['delete'])) {
                 $is_delete = false;
+
                 foreach ($queryParameters['delete'] as $fileName) {
-                    $filePath = realpath($fileManager->getCurrentPath().DIRECTORY_SEPARATOR.$fileName);
-                    if (0 !== strpos($filePath, $fileManager->getCurrentPath())) {
-                        $this->addFlash('danger', 'file.deleted.danger');
+                    $fileInfo = $this->findFile($filesystem,$fileName);
+
+                    if (!$fileInfo['exist']) {
+                        $session->getFlashBag()->add('danger', 'file.deleted.danger');
                     } else {
                         $this->dispatch(FileManagerEvents::PRE_DELETE_FILE);
                         try {
-                            $fs->remove($filePath);
-                            $is_delete = true;
+
+                            $is_delete = $fileInfo['isFile'] ? $filesystem->delete($fileName) : $filesystem->deleteDir($fileName);
+
                         } catch (IOException $exception) {
-                            $this->addFlash('danger', 'file.deleted.unauthorized');
+                            $session->getFlashBag()->add('danger', 'file.deleted.unauthorized');
                         }
                         $this->dispatch(FileManagerEvents::POST_DELETE_FILE);
                     }
                 }
                 if ($is_delete) {
-                    $this->addFlash('success', 'file.deleted.success');
+                    $session->getFlashBag()->add('success', 'file.deleted.success');
                 }
                 unset($queryParameters['delete']);
-            } else {
-                $this->dispatch(FileManagerEvents::PRE_DELETE_FOLDER);
-                try {
-                    $fs->remove($fileManager->getCurrentPath());
-                    $this->addFlash('success', 'folder.deleted.success');
-                } catch (IOException $exception) {
-                    $this->addFlash('danger', 'folder.deleted.unauthorized');
-                }
-
-                $this->dispatch(FileManagerEvents::POST_DELETE_FOLDER);
-                $queryParameters['route'] = dirname($fileManager->getCurrentRoute());
-                if ($queryParameters['route'] = '/') {
-                    unset($queryParameters['route']);
-                }
-
-                return $this->redirectToRoute('file_manager', $queryParameters);
             }
         }
 
-        return $this->redirectToRoute('file_manager', $queryParameters);
+        return $this->redirect($this->generateUrl('file_manager', $queryParameters));
     }
 
     /**
@@ -407,45 +413,47 @@ class ManagerController extends Controller
      * @param FileManager $fileManager
      * @param $path
      * @param string $parent
-     * @param bool   $baseFolderName
-     *
      * @return array|null
      */
-    private function retrieveSubDirectories(FileManager $fileManager, $path, $parent = DIRECTORY_SEPARATOR, $baseFolderName = false)
+    private function retrieveSubDirectories(FileManager $fileManager, $path, $parent = DIRECTORY_SEPARATOR)
     {
-        $directories = new Finder();
-        $directories->in($path)->ignoreUnreadableDirs()->directories()->depth(0)->sortByType()->filter(function (SplFileInfo $file) {
-            return $file->isReadable();
-        });
+        $parameters = $fileManager->getQueryParameters();
 
-        if ($baseFolderName) {
-            $directories->name($baseFolderName);
+        if(isset($parameters['route'])){
+            unset($parameters['route']);
         }
+
+        $fs = $this->getFileSystem($parameters);
+        $directories = $fs->listContents($path);
+
         $directoriesList = null;
 
         foreach ($directories as $directory) {
-            /** @var SplFileInfo $directory */
-            $fileName = $baseFolderName ? '' : $parent.$directory->getFilename();
+            if($directory['type'] == 'dir') {
 
-            $queryParameters = $fileManager->getQueryParameters();
-            $queryParameters['route'] = $fileName;
-            $queryParametersRoute = $queryParameters;
-            unset($queryParametersRoute['route']);
+                $subDirName = strrpos($directory['path'], DIRECTORY_SEPARATOR) ?
+                    substr($directory['path'], strrpos($directory['path'], DIRECTORY_SEPARATOR) + 1) :
+                    $directory['path'];
 
-            $filesNumber = $this->retrieveFilesNumber($directory->getPathname(), $fileManager->getRegex());
-            $fileSpan = $filesNumber > 0 ? " <span class='label label-default'>{$filesNumber}</span>" : '';
+                $fileName = $parent.$subDirName;
 
-            $directoriesList[] = [
-                'text' => $directory->getFilename().$fileSpan,
-                'icon' => 'fa fa-folder-o',
-                'children' => $this->retrieveSubDirectories($fileManager, $directory->getPathname(), $fileName.DIRECTORY_SEPARATOR),
-                'a_attr' => [
-                    'href' => $fileName ? $this->generateUrl('file_manager', $queryParameters) : $this->generateUrl('file_manager', $queryParametersRoute),
-                ], 'state' => [
-                    'selected' => $fileManager->getCurrentRoute() === $fileName,
-                    'opened' => true,
-                ],
-            ];
+                $queryParameters = $fileManager->getQueryParameters();
+                $queryParameters['route'] = $fileName;
+                $queryParametersRoute = $queryParameters;
+                unset($queryParametersRoute['route']);
+
+                $directoriesList[] = [
+                    'text' => $subDirName,
+                    'icon' => 'fa fa-folder-o',
+                    'children' => $this->retrieveSubDirectories($fileManager, $directory['path'], $fileName.DIRECTORY_SEPARATOR),
+                    'a_attr' => [
+                        'href' => $fileName ? $this->generateUrl('file_manager', $queryParameters) : $this->generateUrl('file_manager', $queryParametersRoute),
+                    ], 'state' => [
+                        'selected' => $fileManager->getCurrentRoute() === $fileName,
+                        'opened' => true,
+                    ],
+                ];
+            }
         }
 
         return $directoriesList;
@@ -453,10 +461,8 @@ class ManagerController extends Controller
 
     /**
      * Tree Iterator.
-     *
      * @param $path
      * @param $regex
-     *
      * @return int
      */
     private function retrieveFilesNumber($path, $regex)
@@ -472,6 +478,7 @@ class ManagerController extends Controller
      */
     private function getBasePath($queryParameters)
     {
+        //TODO .... REMOVE IT
         $conf = $queryParameters['conf'];
         $managerConf = $this->container->getParameter('artgris_file_manager')['conf'];
         if (isset($managerConf[$conf]['dir'])) {
@@ -493,14 +500,12 @@ class ManagerController extends Controller
      */
     private function getKernelRoute()
     {
-        return $this->container->getParameter('kernel.root_dir');
+        return $this->container->getParameter('kernel.root_dir');//TODO .... REMOVE IT
     }
 
     /**
      * @param $queryParameters
-     *
      * @return FileManager
-     *
      * @throws \Exception
      */
     private function newFileManager($queryParameters)
@@ -508,6 +513,8 @@ class ManagerController extends Controller
         if (!isset($queryParameters['conf'])) {
             throw new \RuntimeException('Please define a conf parameter in your route');
         }
+        //TODO .... change the fileManager
+
         $webDir = $this->container->getParameter('artgris_file_manager')['web_dir'];
 
         $this->fileManager = new FileManager($queryParameters, $this->getBasePath($queryParameters), $this->getKernelRoute(), $this->get('router'), $webDir);
@@ -524,5 +531,98 @@ class ManagerController extends Controller
         $subject = $arguments['filemanager'];
         $event = new GenericEvent($subject, $arguments);
         $this->get('event_dispatcher')->dispatch($eventName, $event);
+    }
+
+    /**
+     * @param array $queryParameters
+     * @return Flysystem $filesystem
+     */
+    protected function getFileSystem($queryParameters)
+    {
+        $filesystem = $this->container->get('awss3v2_filesystem');
+
+        $basePathName = $this->container->get('aws_account_service')->getPathName();
+        $fileManagerName = $basePathName . '-' . self::FileManager_folder_name;
+
+        $filesystem->getAdapter()->setPathPrefix($basePathName);
+        $filesystem->createDir($fileManagerName);
+        $filesystem->getAdapter()->setPathPrefix($filesystem->getAdapter()->applyPathPrefix($fileManagerName));
+
+        if(isset($queryParameters['route'])){
+            $filesystem->getAdapter()->setPathPrefix($filesystem->getAdapter()->applyPathPrefix($queryParameters['route']));
+            unset($queryParameters['route']);
+        }
+        return $filesystem;
+    }
+
+    /**
+     * @param string $route
+     * @param string $fileName
+     * @return Flysystem $filesystem
+     */
+    protected function getFileLink($route , $fileName)
+    {
+        return $this->container->get('aws_account_service')
+            ->getCloudFrontEndpoint($route, $fileName);
+    }
+
+    /**
+     * @param string $fileName
+     * @param Flysystem $filesystem
+     * @return array $fileInfo
+     */
+    private function findFile($filesystem, $fileName)
+    {
+        $fileInfo = [
+            'exist' => false,
+            'isFile' => false,
+            'isDir' => false
+        ];
+
+        foreach($filesystem->listContents() as $file){
+            if($file['path'] == $fileName){
+                $fileInfo = [
+                    'exist' => true,
+                    'isFile' => $file['type'] == 'file',
+                    'isDir' => $file['type'] == 'dir'
+                ];
+            }
+        }
+
+        return $fileInfo;
+    }
+
+    /**
+     * @param string $fileName
+     * @param Flysystem $filesystem
+     * @return array $fileInfo
+     */
+    private function getResponse($filesystem, $fileName)
+    {
+        $responseInfo = [];
+
+        if($filesystem->has($fileName)){
+
+            $responseInfo = [
+                'name' => $fileName,
+                'size' => $filesystem->getSize($fileName),
+                'type' => $filesystem->getMimetype($fileName),
+                'url' => $fileName,
+                'deleteUrl' => '',
+                'deleteType' => ''
+            ];
+        }
+
+        return $responseInfo;
+    }
+
+    /**
+     * @param string $routeName
+     * @param string $fileName
+     */
+    private function createInvalidation($routeName, $fileName)
+    {
+        $this->container->get('aws_account_service')
+            ->createCloudFrontInvalidation($routeName, $fileName);
     }
 }
