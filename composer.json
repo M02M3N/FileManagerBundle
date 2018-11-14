@@ -27,7 +27,7 @@
     "symfony/asset": "~2.3|~3.0|^4.0",
     "twig/twig": "^1.28 || ^2.0",
     "oneup/flysystem-bundle": "1.14.1",
-    "league/flysystem-aws-s3-v2": "1.0.3",
+    "league/flysystem-aws-s3-v3": "1.0.21",
     "twistor/flysystem-stream-wrapper": "1.0.8"
   },
   "require-dev": {
