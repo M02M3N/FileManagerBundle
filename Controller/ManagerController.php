@@ -5,11 +5,11 @@ namespace Artgris\Bundle\FileManagerBundle\Controller;
 use Artgris\Bundle\FileManagerBundle\Event\FileManagerEvents;
 use Artgris\Bundle\FileManagerBundle\Helpers\File;
 use Artgris\Bundle\FileManagerBundle\Helpers\FileManager;
-use Artgris\Bundle\FileManagerBundle\Helpers\UploadHandler;
 use Artgris\Bundle\FileManagerBundle\Twig\OrderExtension;
 use Sensio\Bundle\FrameworkExtraBundle\Configuration\Method;
 use Sensio\Bundle\FrameworkExtraBundle\Configuration\Route;
 use Symfony\Bundle\FrameworkBundle\Controller\Controller;
+use Symfony\Component\Console\Output\NullOutput;
 use Symfony\Component\EventDispatcher\GenericEvent;
 use Symfony\Component\Filesystem\Exception\IOException;
 use Symfony\Component\Filesystem\Exception\IOExceptionInterface;
@@ -27,7 +27,10 @@ use Symfony\Component\HttpFoundation\Response;
 use Symfony\Component\Validator\Constraints\NotBlank;
 use Twistor\FlysystemStreamWrapper;
 use League\Flysystem\Filesystem as Flysystem;
-use League\Flysystem\AwsS3v2\AwsS3Adapter;
+use League\Flysystem\AwsS3v3\AwsS3Adapter;
+use Symfony\Bundle\FrameworkBundle\Console\Application;
+use Symfony\Component\Console\Input\ArrayInput;
+use Symfony\Component\Console\Output\BufferedOutput;
 /**
  * @author Arthur Gribet <a.gribet@gmail.com>
  * @author Moumen ALSHAAR <moumen.ashaar@gmail.com>
@@ -539,7 +542,7 @@ class ManagerController extends Controller
      */
     protected function getFileSystem($queryParameters)
     {
-        $filesystem = $this->container->get('awss3v2_filesystem');
+        $filesystem = $this->container->get('awss3v3_filesystem');
 
         $basePathName = $this->container->get('aws_account_service')->getPathName();
         $fileManagerName = $basePathName . '-' . self::FileManager_folder_name;
@@ -619,10 +622,20 @@ class ManagerController extends Controller
     /**
      * @param string $routeName
      * @param string $fileName
+     * @return Response
      */
     private function createInvalidation($routeName, $fileName)
     {
-        $this->container->get('aws_account_service')
-            ->createCloudFrontInvalidation($routeName, $fileName);
+        $kernel = $this->get('kernel');
+        $application = new Application($kernel);
+        $application->setAutoExit(false);
+
+        $input = $this->container->get('aws_account_service')
+            ->createCommandInput($routeName, $fileName, $kernel->getEnvironment());
+
+        $output =  new NullOutput();
+        $application->run($input, $output);
+
+        return new Response('');
     }
 }
